@@ -1,0 +1,25 @@
+Lab 10 - Add Your Own System Call: trace
+Ina Pancenco, FAF-242. xv6-riscv in QEMU (make qemu, 3 harts).
+
+1. In "trace 32 grep hello README" why do you see only read, and not open or
+   close?
+   The mask 32 is 2^5, so only bit 5 is on, and 5 is SYS_read. The kernel prints
+   a call only if its own bit is on: open is 15 and close is 21, and those bits
+   are off. grep does call open and close (they appear with the mask 2147483647),
+   they are just not printed.
+
+2. In forkforkfork, different pids print lines. Which line of code from Part 2
+   makes that possible?
+   np->trace_mask = p->trace_mask; in fork() (kernel/proc.c). Each child copies
+   the mask of its parent, so the children, and their children, are traced too.
+   Without this line only the first process would print.
+
+3. In "trace 65536 echo hi" the trace line is printed between "hi" and the new
+   line. Why? (How many times does echo call write?)
+   echo calls write two times: once for "hi" (-> 2) and once for "\n" (-> 1).
+   The kernel prints the trace line after each call has finished. So the order
+   is: "hi", the line for the first write, "\n", the line for the second write.
+
+4. Which mask traces both open (15) and close (21), and nothing else?
+   2^15 + 2^21 = 32768 + 2097152 = 2129920.
+   "trace 2129920 grep hello README" prints only open -> 3 and close -> 0.
