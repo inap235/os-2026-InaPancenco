@@ -1,0 +1,46 @@
+Lab 13 - Semaphores in Your Own Kernel
+Ina Pancenco, FAF-242. xv6-riscv in QEMU (make qemu, 3 harts).
+New system calls: sem_init 24, sem_down 25, sem_up 26 (and the optional
+sem_trydown 27), in kernel/sem.c. semtest prints "semtest: OK".
+
+1. Without the lock, why do the letters mix? (How many system calls does one
+   line cost?)
+   mix writes one letter per write(), so one line of 30 letters plus "\n" costs
+   31 system calls. The two processes run at the same time on different harts,
+   and the kernel can also switch between them after any of those calls. A line
+   is not one action, so the letters of A and b get mixed in between.
+
+2. With the lock every line is whole. Which two lines of mix.c make one line a
+   critical section?
+       if (uselock)
+         sem_down(3);      before the loop that writes the line
+       if (uselock)
+         sem_up(3);        after it
+   Semaphore 3 starts at 1 (sem_init(3, 1)), so it works as a lock: while one
+   process writes its line, the other one sleeps in sem_down(3).
+
+3. In sem_down the test is "while (s->value == 0)", not "if". Why can a process
+   wake up and still find 0?
+   sem_up calls wakeup(s), which wakes ALL the processes sleeping on s, but
+   adds only 1. The first one that gets the spinlock takes the unit and the
+   value is 0 again, so the others must check again and go back to sleep. A new
+   process that was not sleeping can also call sem_down and take the unit before
+   the woken one gets the lock. And the loop also has to check killed() after
+   every wakeup.
+
+4. sem_down calls release(&s->lock) BEFORE sleep(). What would go wrong if it
+   slept holding the spinlock?
+   sem_up needs the same spinlock to add 1 and call wakeup. It would spin forever
+   in acquire() on another hart, and the sleeper would never be woken: a
+   deadlock. On top of that, in xv6 a process must not give up the CPU while
+   holding a spinlock other than p->lock (interrupts are off while it is held):
+   sched() checks this and the kernel stops with "panic: sched locks".
+   sleep_prepare(s) is called before release, so a sem_up that comes in
+   between release and sleep is not lost: sleep() then returns at once.
+
+Optional: sem_trydown(id), number 27. Like sem_down, but if the value is 0 it
+returns -1 at once instead of sleeping. user/trydown.c:
+   $ trydown
+   value 1: sem_trydown -> 0 (took it)
+   value 0: sem_trydown -> -1 (did not sleep)
+   after sem_up: sem_trydown -> 0
