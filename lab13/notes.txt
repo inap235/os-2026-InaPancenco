@@ -3,6 +3,163 @@ Ina Pancenco, FAF-242. xv6-riscv in QEMU (make qemu, 3 harts).
 New system calls: sem_init 24, sem_down 25, sem_up 26 (and the optional
 sem_trydown 27), in kernel/sem.c. semtest prints "semtest: OK".
 
+Files of this lab (copies of the ones in my ~/xv6-riscv tree, branch lab):
+   syscall.h, syscall.c, sem.c     from kernel/
+   user.h, usys.pl                 from user/
+   semtest.c, mix.c, trydown.c     from user/
+   Makefile
+
+
+PART 1 - The numbers and the user side
+
+The same recipe as trace in Lab 10, three times:
+   kernel/syscall.h   #define SYS_sem_init 24, SYS_sem_down 25, SYS_sem_up 26
+                      (22 is sync, 23 is trace from Lab 10)
+   user/user.h        int sem_init(int, int); int sem_down(int); int sem_up(int);
+   user/usys.pl       entry("sem_init"); entry("sem_down"); entry("sem_up");
+   user/semtest.c     the two tests (order, ping-pong)
+   user/mix.c         two processes on one screen, for Part 3
+   Makefile           $U/_semtest\ and $U/_mix\ in UPROGS, after $U/_zombie\
+
+Check 1: the calls reach the kernel, which does not know them yet
+
+At this moment only the user side exists. kernel/sem.c is not written, sem.o is
+not in OBJS and kernel/syscall.c has no entries for 24, 25 and 26. The stubs
+from usys.pl put the number in a7 and do ecall, the kernel looks in its table,
+finds nothing and complains:
+
+   $ semtest
+   3 semtest: unknown sys call 24
+   4 semtest: unknown sys call 25
+   child: I ran after the parent
+   parent: done, I let the child go
+   3 semtest: unknown sys call 26
+   3 semtest: unknown sys call 24
+   3 semtest: unknown sys call 24
+   3 semtest: unknown sys call 25
+   5 semtest: unknown sys call 25
+    pi pong n1g
+   3 semtest: unknown  sys call 26
+   3 semtest: unknown sys call 25
+   1
+   5 semtest: unknown syps call 26
+   i5 semtest: unknown sys call 25
+   n g 2
+   3 semtest: unknown sys call 26
+   3 semte st: unknown sys call 25
+   pongping 3
+   3 semtest:  unknown sys call 26
+   2
+   5 semtest: unknown sys call 26
+   5 semtest: unknown sys call 25
+     pong 3
+   5 semtest: unknown sys call 26
+   semtest: OK
+
+What I see:
+ - The first two lines are exactly the ones from the handout. Pid 3 is the
+   parent (sem_init is call 24), pid 4 is the first child (sem_down is call 25).
+   So the numbers do reach the kernel: the user side is correct.
+ - The line "child:" comes BEFORE the line "parent:". An unknown call returns -1
+   at once, so sem_down(0) does not wait for anything and the child runs first,
+   while the parent is still in pause(10).
+ - After that ping and pong are mixed with the error lines and with each other
+   ("pi pong n1g", "pongping 3"). Nothing makes them take turns, and they print
+   at the same time on different harts.
+ - "semtest: OK" is still printed at the end. This does not mean the test
+   passed: the program does not check the return values, it only prints the
+   line when it finishes. The real test is the order of the lines.
+Check 1 is reached. Part 2 is what fixes the order.
+
+
+PART 2 - The kernel side
+
+kernel/sem.c (new file) has a table of NSEM = 8 semaphores, shared by all the
+processes. One semaphore is only an int value and a spinlock that protects it.
+ - sys_sem_init(id, value): checks the id (0 to 7) and the value (not negative),
+   then writes the value under the spinlock.
+ - sys_sem_down(id): takes the spinlock. While the value is 0 it calls
+   sleep_prepare(s), releases the spinlock, calls sleep() and takes the
+   spinlock again. Our xv6 sleeps in these two steps, not with sleep(chan, lock)
+   like in the book. After every wakeup it also checks killed(), so kill still
+   works on a waiting process. When the value is not 0 it does value-- and
+   returns 0.
+ - sys_sem_up(id): takes the spinlock, does value++, calls wakeup(s), releases.
+The process sleeps on the address of the semaphore, and sem_up wakes the same
+address. A sleeping process uses no CPU.
+
+Then:
+   Makefile            $K/sem.o \ in OBJS, after $K/sysproc.o \
+   kernel/syscall.c    extern uint64 sys_sem_init(void); ... and
+                       [SYS_sem_init] = sys_sem_init, ... in the table
+I also added the three names to the names table of trace from Lab 10.
+
+Check 2: semtest
+
+   $ semtest
+   parent: done, I let the child go
+   child: I ran after the parent
+   ping 1
+     pong 1
+   ping 2
+     pong 2
+   ping 3
+     pong 3
+   semtest: OK
+
+No more "unknown sys call" lines. The parent waits 10 ticks before sem_up(0),
+and the child still prints second: it was asleep in sem_down(0), because
+semaphore 0 starts at 0. Ping and pong alternate strictly, three times each:
+semaphore 1 is ping's turn (starts at 1), semaphore 2 is pong's turn (starts
+at 0), and each one gives the turn to the other with sem_up.
+
+
+PART 3 - A semaphore as a lock: mix
+
+Without the lock (two runs, they are different every time):
+
+   $ mix
+   AAAAAAAAAAAAAAAAAAAAAbAAAAAAAbAbAbbbbbbbbbb
+   bAAAAAAAAAAbAbbbbbbbbbbbbbbAAAAAAAAAAAAb
+   AAAbAbbAAbAbbbbbbbbbbbbbb
+   AAbbbAAAAbAbAAAAbAbAbbAbbb
+   bbbbbbbbbbbbbbbbbbbbbbbbbbbbAAAAAAAAAbAAAAb
+   AAbAb
+   AbbAbbbbbbbbbbbbbbbAAAbAAbbbbAbbbbbb
+   bbbbAbAAAAAAAAAAAbAAbAbbbbAAAAAAA
+   AbAbbbAbbbbbbbbbbAbAAAAbbbb
+   AAAAAAAAAAAAAAAAAAAAAA
+   $ mix
+   AAAbAbAbAAAbbAbAbAAAAAAAAAAAbAAAbAbbbbbbbbbbbbbAAbAAAb
+   AAbAAAAAAAAbAAAbAAAAAAAbbb
+   AAbbAAAAbAbbbAbbbbbbbbbbbbbbbbAA
+   AAAAbAAAbbbbbbb
+   bbbbAAAAAAAAAAbbAAAAAAAAAAAAbbbbbbbbbbbbbbbbbbbbbbAbb
+   b
+   bAbbbbbAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+   AAAAAbAbbAbbbbbbbAbbbbbAbbAbbbAbbbA
+   AbbbbbAbAbbAbAAAbAAbbAAAbbbbAAAAbbbbbbbAbbbbbbb
+   A
+
+With the lock:
+
+   $ mix lock
+   AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+   AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+   AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+   AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+   AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+Without the lock no line is whole. With the lock all ten lines have exactly 30
+letters of one kind.
+
+Observe
+
 1. Without the lock, why do the letters mix? (How many system calls does one
    line cost?)
    mix writes one letter per write(), so one line of 30 letters plus "\n" costs
@@ -37,6 +194,7 @@ sem_trydown 27), in kernel/sem.c. semtest prints "semtest: OK".
    sched() checks this and the kernel stops with "panic: sched locks".
    sleep_prepare(s) is called before release, so a sem_up that comes in
    between release and sleep is not lost: sleep() then returns at once.
+
 
 Optional: sem_trydown(id), number 27. Like sem_down, but if the value is 0 it
 returns -1 at once instead of sleeping. user/trydown.c:
